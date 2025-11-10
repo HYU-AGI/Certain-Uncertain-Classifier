@@ -16,11 +16,11 @@ To install requirements:
 pip install -r requirements.txt
 ```
 
-## 💻 실행 방법
-### Step 1. Dataset 준비
+## 💻 Usage Guide
+### 1. Dataset 준비
 - 자세한 내용은 [README.md](data/README.md)를 참고해주세요.
 
-### Step 2. Run the Classifier
+### 2. Classifier 실행
 ```
 python src/classifier.py --dataset_name "dataset_name" --model_name "model_name"
 ```
