@@ -1,189 +1,164 @@
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-
+import argparse
+import logging
+import os
+from datetime import datetime
+from models import load_model
+import json
+from tqdm import tqdm
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
-
-try:
-    from openai_harmony import load_harmony_encoding, HarmonyEncodingName  # type: ignore
-    _HARMONY = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
-    _HARMONY_EOS: Optional[List[int]] = _HARMONY.stop_tokens_for_assistant_actions()
-except Exception:
-    _HARMONY = None
-    _HARMONY_EOS = None
+from typing import Optional
 
 
-SUPPORTED_MODELS = {
-    "gpt-oss-20b",
-    "qwen3-8b",
-    "qwen3-14b",
-    "deepseek-v2-16b",
-    "llama-3b",
-    "llama-8b",
-    "mistral-7b",
+class ModelWrapper:
+    def __init__(self, args):
+        self.args = args
+        self.model_name = self.args.model_name
+        self.model, self.tokenizer = load_model(self.args)
+
+
+class Certainity_classifier:
+    def __init__(self, llm, problem, threshold):
+        self.llm = llm
+        self.problem = problem
+        self.threshold = threshold
+
+        self.spp_nll: Optional[float] = None
+        self.spp_ppl: Optional[float] = None
+
+
+    # ----- Self-Perplexity 계산 ----- #
+    @torch.no_grad()
+    def _compute_spp(self):
+        model = self.llm.model
+        tokenizer = self.llm.tokenizer
+        device = next(model.parameters()).device
+
+        enc = tokenizer(self.problem, return_tensors="pt")
+        input_ids = enc["input_ids"].to(device)
+        attn_mask = enc.get("attention_mask", torch.ones_like(input_ids)).to(device)
+
+        if input_ids.shape[1] < 2:
+            self.spp_nll, self.spp_ppl = 0.0, 1.0
+            return
+
+        out = model(input_ids=input_ids, attention_mask=attn_mask)
+        logits = out.logits[:, :-1, :]
+        labels = input_ids[:, 1:]
+        mask = attn_mask[:, 1:]
+
+        log_probs = torch.log_softmax(logits, dim=-1)
+        token_lp = log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+        nll = -(token_lp * mask).sum() / (mask.sum() + 1e-9)
+
+        ppl = float(torch.exp(nll))
+        self.spp_nll = float(nll)
+        self.spp_ppl = ppl
+
+
+    def __call__(self):
+        self._compute_spp(self.problem)
+
+        # Self-Perplexity를 기반으로 한 Certain / Uncertain 여부 판단
+        if self.spp_ppl >= self.threshold:
+            return "Uncertain"
+        else:
+            return "Certain"
+
+
+        
+def setup_logging(log_file, log_level):
+    logger = logging.getLogger("__name__")
+    logger.setLevel(getattr(logging, log_level))
+    handler = logging.FileHandler(log_file)
+    handler.setLevel(getattr(logging, log_level))
+    formatter = logging.Formatter('%(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    return logger
+
+
+model_version = {
+    "gpt-oss-20b": "openai/gpt-oss-20b",
+    "qwen3-8b": "Qwen/Qwen3-8B",
+    "qwen3-14b": "Qwen/Qwen3-14B",
+    "deepseek-v2-16b": "deepseek-ai/DeepSeek-V2-Lite-Chat",
+    "llama-3b": "meta-llama/Llama-3.2-3B-Instruct",
+    "llama-8b": "meta-llama/Llama-3.1-8B-Instruct",
+    "mistral-7b": "mistralai/Mistral-7B-Instruct-v0.3"
 }
 
 
-@dataclass
-class Args:
-    model_name: str
-    model_id: str
-    cache_dir: Optional[str] = None
-    max_new_tokens: int = 512
-    do_sample: bool = True
-    top_p: Optional[float] = 0.95
-    top_k: Optional[int] = 50
-    temperature: float = 0.7
+def main():
+    parser = argparse.ArgumentParser(description="Certain/Uncertain Classifier")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--save_interval", type=int, default=1)
+    parser.add_argument("--model_name", type=str, default="qwen3-14b")
+    parser.add_argument("--dataset_name", type=str, default="HotpotQA", help="HotpotQA, StrategyQA, MATH500, T4D")
+    parser.add_argument("--do_sample", type=bool, default=False)
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top_p", type=float, default=0.95)
+    parser.add_argument("--top_k", type=int, default=50)
+    parser.add_argument("--max_new_tokens", type=int, default=1024)
+    parser.add_argument("--log_dir", type=str, default="logs")
+    parser.add_argument("--log_level", type=str, default="INFO")
+    parser.add_argument("--output_dir", type=str, default="output")
+    parser.add_argument("--cache_dir", type=str, default="cache")
+    parser.add_argument("--data_dir", type=str, default="data")
+    parser.add_argument("--force_eager_attn", action="store_true")
+    parser.add_argument("--disable_sdp_flash", action="store_true")
 
 
-def _inject_reasoning_low(messages):
-    has_low = any(m.get("role") == "system" and "Reasoning:" in m.get("content", "") for m in messages)
-    if not has_low:
-        return [{"role": "system", "content": "Reasoning: low"}] + messages
-    return messages
-
-
-def _extract_harmony_final(decoded: str) -> Optional[str]:
-    start_tag = "<|channel|>final<|message|>"
-    end_tag = "<|end|>"
-    if start_tag in decoded:
-        part = decoded.split(start_tag, 1)[-1]
-        if end_tag in part:
-            part = part.split(end_tag, 1)[0]
-        return part.strip()
-    start_alt = "<|final|>"
-    if start_alt in decoded:
-        part = decoded.split(start_alt, 1)[-1]
-        if end_tag in part:
-            part = part.split(end_tag, 1)[0]
-        return part.strip()
-    return None
-
-
-def load_model(args: Args) -> Tuple[Any, Any]:
-    if args.model_name not in SUPPORTED_MODELS:
-        raise ValueError(f"Model {args.model_name} is not supported.")
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_id,
-        trust_remote_code=True,
-        cache_dir=args.cache_dir,
-    )
-
-    model_kwargs: Dict[str, Any] = dict(
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        cache_dir=args.cache_dir,
-        trust_remote_code=True,
-        use_kernels=False
-    )
-
-    try:
-        model = AutoModelForCausalLM.from_pretrained(args.model_id, **model_kwargs)
-    except TypeError:
-        model_kwargs.pop("use_kernels", None)
-        model = AutoModelForCausalLM.from_pretrained(args.model_id, **model_kwargs)
-
-    return model, tokenizer
-
-
-def generate_response(
-    model: Any,
-    tokenizer: Any,
-    messages,
-    args: Args,
-    forced_prefix: Optional[str] = None,
-) -> Tuple[str, Dict[str, int]]:
-    try:
-        model.generation_config = GenerationConfig.from_pretrained(args.model_id)
-    except Exception:
-        pass
-
-    if args.model_name == "deepseek-v2-16b":
-        try:
-            model.config.use_cache = False
-        except Exception:
-            pass
-
-    inputs = _apply_chat_template(tokenizer, args.model_name, messages).to(model.device)
-
-    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else getattr(model.generation_config, "eos_token_id", None)
-    if isinstance(pad_id, (list, tuple)):
-        pad_id = pad_id[0]
-    if pad_id is not None:
-        model.generation_config.pad_token_id = pad_id
-
-    prefix_len = 0
-    if forced_prefix:
-        if args.model_name.startswith("gpt-oss"):
-            forced = "<|channel|>final<|message|>" + forced_prefix
-        else:
-            forced = forced_prefix
-        pref_ids = tokenizer(forced, add_special_tokens=False, return_tensors="pt")["input_ids"].to(model.device)
-        prefix_len = pref_ids.shape[1]
-        inputs["input_ids"] = torch.cat([inputs["input_ids"], pref_ids], dim=1)
-        if "attention_mask" in inputs:
-            pref_mask = torch.ones_like(pref_ids)
-            inputs["attention_mask"] = torch.cat([inputs["attention_mask"], pref_mask], dim=1)
-
-    prompt_len = inputs["input_ids"].shape[1]
-
-    gen_kwargs: Dict[str, Any] = dict(max_new_tokens=args.max_new_tokens)
-    if args.do_sample:
-        gen_kwargs.update(
-            dict(
-                do_sample=True,
-                top_p=args.top_p if args.top_p is not None else 0.95,
-                top_k=args.top_k if args.top_k is not None else 50,
-                temperature=None if args.temperature == 0 else args.temperature,
-            )
-        )
-    else:
-        gen_kwargs.update(dict(do_sample=False))
-
-    if args.model_name.startswith("gpt-oss") and _HARMONY_EOS:
-        gen_kwargs["eos_token_id"] = _HARMONY_EOS
-
-    outputs = model.generate(**inputs, **gen_kwargs)
-
-    if args.model_name.startswith("gpt-oss"):
-        decoded_full = tokenizer.decode(outputs[0], skip_special_tokens=False)
-        final_only = _extract_harmony_final(decoded_full)
-        if final_only is None:
-            start = prompt_len - prefix_len if forced_prefix else prompt_len
-            generated = tokenizer.decode(outputs[0][start:], skip_special_tokens=True).strip()
-        else:
-            generated = final_only.strip()
-    else:
-        start = prompt_len - prefix_len if forced_prefix else prompt_len
-        generated = tokenizer.decode(outputs[0][start:], skip_special_tokens=True).strip()
-
-    stats = {
-        "input_len": prompt_len,
-        "output_len": int(outputs[0].shape[0] - prompt_len),
-        "prefix_len": prefix_len,
-    }
-    return generated, stats
-
-
-def _apply_chat_template(tokenizer, model_name: str, messages, *, as_text: bool = False):
-    if model_name.startswith("gpt-oss"):
-        messages = _inject_reasoning_low(messages)
-        return tokenizer.apply_chat_template(
-            messages, tokenize=not as_text, add_generation_prompt=True,
-            return_tensors=None if as_text else "pt",
-            return_dict=not as_text
-        )
-    elif model_name.startswith("qwen3"):
-        return tokenizer.apply_chat_template(
-            messages, tokenize=not as_text, enable_thinking=False, add_generation_prompt=True,
-            return_tensors=None if as_text else "pt",
-            return_dict=not as_text
-        )
-    else:
-        return tokenizer.apply_chat_template(
-            messages, tokenize=not as_text, add_generation_prompt=True,
-            return_tensors=None if as_text else "pt",
-            return_dict=not as_text
-        )
+    args = parser.parse_args()
     
+    log_dir = os.path.join(args.log_dir, args.dataset_name)
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"{args.model_name}_{timestamp}.log")
+
+    logger = setup_logging(log_file, args.log_level)
+    logger = logging.getLogger(__name__)
+    logger.info(f"Starting Classifying using {args.model_name} for {args.dataset_name}")
+    for arg, value in vars(args).items():
+        logger.info(f"{arg}: {value}")
+    logger.info(f"Logs saved to {os.path.abspath(log_file)}")
+
+
+    output_dir = os.path.join(args.output_dir, args.dataset_name)
+    output_path = os.path.join(output_dir, f"{args.model_name}.json")
+    os.makedirs(output_dir, exist_ok=True)
+
+    args.model_id = model_version[args.model_name]
+
+    model = ModelWrapper(args)
+
+
+    data_path = os.path.join(args.data_dir, args.dataset_name, f"{args.dataset_name}.json")
+    with open(data_path, 'r') as f:
+        dataset = json.load(f)
+
+    res = []
+    for idx, data in tqdm(enumerate(dataset)):
+        runner = Certainity_classifier(model, data['question'])
+        result = runner()
+        tmp = {
+            "id": data['id'],
+            "question": data['question'],
+            "answer": data.get('answer'),
+            "spp_nll": runner.spp_nll,
+            "spp_ppl": runner.spp_ppl,
+            "cls_result": result
+        }
+        res.append(tmp)
+
+        if idx % args.save_interval == 0:
+            with open(output_path, 'w') as f:
+                json.dump(res, f, indent=4)
+            logger.info(f"Results saved to {os.path.abspath(output_path)}")
+
+    with open(output_path, 'w') as f:
+        json.dump(res, f, indent=4)
+    logger.info(f"All results saved to {os.path.abspath(output_path)}")
+
+
+if __name__ == "__main__":
+    main()
