@@ -2,7 +2,7 @@ import argparse
 import logging
 import os
 from datetime import datetime
-from model_loader import load_model
+from models import load_model
 import json
 from tqdm import tqdm
 import torch
@@ -155,3 +155,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
