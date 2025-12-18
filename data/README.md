@@ -27,6 +27,18 @@
 }
 ```
 
+### Musique
+- 📎 Link : https://github.com/StonyBrookNLP/musique
+
+```
+@inproceedings{trivedi2022musique,
+  title={MuSiQue: Multihop Questions via Single-hop Question Composition},
+  author={Trivedi, Harsh and Balasubramanian, Niranjan and Khot, Tushar and Sabharwal, Ashish},
+  booktitle={Transactions of the Association for Computational Linguistics (TACL)},
+  year={2022}
+}
+```
+
 ### T4D
 - 📎 Link : https://huggingface.co/datasets/sachithgunasekara/t4d
 
