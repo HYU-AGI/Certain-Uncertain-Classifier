@@ -9,7 +9,7 @@ import torch
 from typing import Optional
 
 
-class Certainity_classifier:
+class Certainty_classifier:
     def __init__(self, llm, problem, threshold):
         self.llm = llm
         self.problem = problem
@@ -49,7 +49,7 @@ class Certainity_classifier:
 
 
     def __call__(self):
-        self._compute_spp(self.problem)
+        self._compute_spp()
 
         # Self-Perplexity를 기반으로 한 Certain / Uncertain 여부 판단
         if self.spp_ppl >= self.threshold:
@@ -131,7 +131,7 @@ def main():
 
     res = []
     for idx, data in tqdm(enumerate(dataset)):
-        runner = Certainity_classifier(model, data['question'])
+        runner = Certainty_classifier(model, data['question'], threshold=10.0)
         result = runner()
         tmp = {
             "id": data['id'],
