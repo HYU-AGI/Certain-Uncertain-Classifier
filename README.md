@@ -25,6 +25,11 @@ pip install -r requirements.txt
 python src/classifier.py --dataset_name "dataset_name" --model_name "model_name"
 ```
 
+**주요 파라미터:**
+- `--dataset_name`: 사용할 데이터셋 (HotpotQA, StrategyQA, Musique, MATH500, T4D)
+- `--model_name`: 사용할 모델 (qwen3-8b, qwen3-14b, llama-8b, mistral-7b 등)
+- `threshold`: 코드 내에서 조정 가능한 확신도 임계값 (기본값: 10.0)
+
 ## 🧠 작동 원리
 **1️⃣ 질문 입력 및 내부 확률 분포 계산** \
 모델은 input prompt 만을 입력받아, 이에 대한 logits 값을 계산합니다. \
