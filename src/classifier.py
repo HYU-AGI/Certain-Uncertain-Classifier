@@ -99,7 +99,7 @@ def main():
     parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--force_eager_attn", action="store_true")
     parser.add_argument("--disable_sdp_flash", action="store_true")
-
+    parser.add_argument("--threshold", type=float, default=50.0)
 
     args = parser.parse_args()
     
@@ -131,7 +131,7 @@ def main():
 
     res = []
     for idx, data in tqdm(enumerate(dataset)):
-        runner = Certainty_classifier(model, data['question'], threshold=10.0)
+        runner = Certainty_classifier(model, data['question'], threshold=args.threshold)
         result = runner()
         tmp = {
             "id": data['id'],
@@ -155,4 +155,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
