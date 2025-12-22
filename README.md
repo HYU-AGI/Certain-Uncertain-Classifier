@@ -22,13 +22,13 @@ pip install -r requirements.txt
 
 ### 2. Classifier 실행
 ```
-python src/classifier.py --dataset_name "dataset_name" --model_name "model_name"
+python src/classifier.py --dataset_name "dataset_name" --model_name "model_name" --threshold 50.0
 ```
 
 **주요 파라미터:**
 - `--dataset_name`: 사용할 데이터셋 (HotpotQA, StrategyQA, Musique, MATH500, T4D)
 - `--model_name`: 사용할 모델 (qwen3-8b, qwen3-14b, llama-8b, mistral-7b 등)
-- `threshold`: 코드 내에서 조정 가능한 확신도 임계값 (기본값: 10.0)
+- `threshold`: classifier가 certain/uncertain을 분류하기 위해 사용하는 threhsold 값
 
 ## 🧠 작동 원리
 **1️⃣ 질문 입력 및 내부 확률 분포 계산** \
